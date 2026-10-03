@@ -1,0 +1,21 @@
+services:
+  umi-consensus:
+    build: .
+    image: umi-consensus-api:1.1.0
+    container_name: umi-consensus-api
+    ports:
+      - "8000:8000"
+    environment:
+      UMI_DB_PATH: /data/umi.db
+    volumes:
+      - umi-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request,sys; sys.exit(0 if json.load(urllib.request.urlopen('http://127.0.0.1:8000/healthz'))['status']=='ok' else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  umi-data:

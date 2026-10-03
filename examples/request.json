@@ -1,0 +1,26 @@
+{
+  "request_id": "demo-run-001",
+  "sample_id": "sample-2026-1001",
+  "reads": [
+    {"locus": "IGH-A", "read_id": "a01", "umi": "AAAAA", "sequence": "ACGT", "qualities": [40, 40, 40, 40]},
+    {"locus": "IGH-A", "read_id": "a02", "umi": "AAAAA", "sequence": "ACGT", "qualities": [40, 39, 40, 38]},
+    {"locus": "IGH-A", "read_id": "a03", "umi": "AAAAA", "sequence": "ACGT", "qualities": [38, 40, 39, 40]},
+    {"locus": "IGH-A", "read_id": "a04", "umi": "AAAAT", "sequence": "ACGT", "qualities": [35, 36, 35, 34]},
+
+    {"locus": "IGH-A", "read_id": "a05", "umi": "CCCCC", "sequence": "TTTT", "qualities": [40, 40, 40, 40]},
+    {"locus": "IGH-A", "read_id": "a06", "umi": "CCCCC", "sequence": "TATT", "qualities": [40, 40, 40, 40]},
+    {"locus": "IGH-A", "read_id": "a07", "umi": "CCCCC", "sequence": "TATT", "qualities": [30, 30, 30, 30]},
+
+    {"locus": "IGH-B", "read_id": "b01", "umi": "GGGGG", "sequence": "ACGT", "qualities": [30, 30, 30, 30]},
+    {"locus": "IGH-B", "read_id": "b02", "umi": "GGGGG", "sequence": "ACGT", "qualities": [30, 30, 30, 30]},
+    {"locus": "IGH-B", "read_id": "b03", "umi": "GGGGT", "sequence": "ACGT", "qualities": [30, 30, 30, 30]},
+    {"locus": "IGH-B", "read_id": "b04", "umi": "GGGAT", "sequence": "ACGT", "qualities": [30, 30, 30, 30]},
+
+    {"locus": "IGH-C", "read_id": "c01", "umi": "TTTTA", "sequence": "GATT", "qualities": [40, 40, 40, 40]},
+    {"locus": "IGH-C", "read_id": "c02", "umi": "TTTTA", "sequence": "GATT", "qualities": [40, 40, 40, 40]},
+
+    {"locus": "IGH-D", "read_id": "d01", "umi": "AGAGT", "sequence": "CGTA", "qualities": [37, 37, 37, 37]},
+    {"locus": "IGH-D", "read_id": "d02", "umi": "AGAGT", "sequence": "CGTA", "qualities": [36, 37, 35, 37]},
+    {"locus": "IGH-D", "read_id": "d03", "umi": "AGAGC", "sequence": "CGTA", "qualities": [37, 36, 37, 37]}
+  ]
+}

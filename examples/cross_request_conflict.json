@@ -1,0 +1,10 @@
+{
+  "request_id": "demo-run-003",
+  "sample_id": "sample-2026-1001",
+  "reads": [
+    {"locus": "IGH-A", "read_id": "a01", "umi": "AAAAA", "sequence": "ACGT", "qualities": [40, 40, 40, 40]},
+    {"locus": "IGH-A", "read_id": "a02", "umi": "AAAAA", "sequence": "ACGG", "qualities": [40, 39, 40, 38]},
+    {"locus": "IGH-A", "read_id": "a03", "umi": "AAAAA", "sequence": "ACGT", "qualities": [38, 40, 39, 40]},
+    {"locus": "IGH-A", "read_id": "a04", "umi": "AAAAT", "sequence": "ACGT", "qualities": [35, 36, 35, 34]}
+  ]
+}
