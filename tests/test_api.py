@@ -2,6 +2,7 @@
 import json
 import sqlite3
 import threading
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -469,3 +470,247 @@ def test_legacy_db_keeps_old_versions_readable_and_tombstones_read_ids(
 
         # Old snapshot remains untouched.
         assert c.get("/consensus/1").json() == legacy_snapshot
+
+
+# --------------------------------------------------------------------------
+# Recovery from an upgrade interrupted after read_registry was created but
+# before the legacy back-fill committed (the old code treated the table's
+# existence as completion and skipped the back-fill on restart).
+# --------------------------------------------------------------------------
+
+def _simulate_interrupted_upgrade(path) -> dict:
+    """Legacy DB plus a committed, EMPTY read_registry and no marker."""
+    snapshot = _seed_legacy_db(path)
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE read_registry (
+                read_id      TEXT PRIMARY KEY,
+                locus        TEXT,
+                umi          TEXT,
+                sequence     TEXT,
+                qualities    TEXT,
+                content_hash TEXT,
+                version      INTEGER NOT NULL,
+                created_at   TEXT NOT NULL
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return snapshot
+
+
+def test_interrupted_upgrade_is_resumed_on_restart(tmp_path, monkeypatch):
+    db_path = tmp_path / "interrupted.db"
+    legacy_snapshot = _simulate_interrupted_upgrade(db_path)
+
+    # The empty table must not count as "migrated": tombstones are missing.
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute("SELECT count(*) FROM read_registry").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+    monkeypatch.setenv("UMI_DB_PATH", str(db_path))
+    from app.main import app
+
+    with TestClient(app) as c:
+        # Back-fill resumed: old snapshot intact and old ids are tombstones.
+        assert c.get("/consensus/1").json() == legacy_snapshot
+
+        reuse = {
+            "request_id": "after-recovery-1",
+            "sample_id": "s",
+            "reads": [_read(f"old-{i}") for i in range(4)],
+        }
+        resp = c.post("/consensus", json=reuse)
+        assert resp.status_code == 409
+        assert "pre-upgrade result" in resp.json()["detail"]["error"]
+        assert c.get("/healthz").json()["latest_version"] == 1
+
+        # Brand-new ids still submit normally.
+        fresh = {
+            "request_id": "after-recovery-2",
+            "sample_id": "s",
+            "reads": [_read(f"new-{i}") for i in range(4)],
+        }
+        ok = c.post("/consensus", json=fresh)
+        assert ok.status_code == 200
+        assert ok.headers["X-Idempotent-Replay"] == "false"
+        assert ok.json()["version"] == 2
+
+        # Same request_id + same payload replays v2; different payload 409.
+        replay = c.post("/consensus", json=fresh)
+        assert replay.status_code == 200
+        assert replay.headers["X-Idempotent-Replay"] == "true"
+        assert replay.json()["version"] == 2
+
+        changed = {
+            **fresh,
+            "reads": [
+                {**fresh["reads"][0], "sequence": "ACGG"},
+                *fresh["reads"][1:],
+            ],
+        }
+        assert c.post("/consensus", json=changed).status_code == 409
+        assert c.get("/healthz").json()["latest_version"] == 2
+
+        assert c.get("/consensus/1").json() == legacy_snapshot
+
+    # Restart against the same file: migration is idempotent and the marker
+    # prevents any re-run; reuse still 409.
+    with TestClient(app) as c2:
+        assert c2.get("/consensus/2").status_code == 200
+        again = c2.post(
+            "/consensus",
+            json={
+                "request_id": "after-recovery-3",
+                "sample_id": "s",
+                "reads": [_read("old-0"), _read("old-1"),
+                          _read("old-2"), _read("old-3")],
+            },
+        )
+        assert again.status_code == 409
+        assert c2.get("/healthz").json()["latest_version"] == 2
+
+
+def test_migration_backfill_and_marker_commit_together(
+    tmp_path, monkeypatch
+):
+    """A failing back-fill commits nothing: table and marker roll back."""
+    from app import db as db_module
+
+    db_path = tmp_path / "rollback.db"
+    _seed_legacy_db(db_path)
+
+    original = db_module.Database._migrate_legacy_reads
+
+    def fail_after_backfill(conn):
+        original(conn)
+        raise RuntimeError("simulated crash before commit")
+
+    monkeypatch.setattr(
+        db_module.Database,
+        "_migrate_legacy_reads",
+        staticmethod(fail_after_backfill),
+    )
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        db_module.Database(str(db_path))
+
+    # The entire migration transaction (DDL included) rolled back.
+    conn = sqlite3.connect(db_path)
+    try:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert "read_registry" not in tables
+        assert "schema_migrations" not in tables
+    finally:
+        conn.close()
+
+    # A later start retries and completes the upgrade normally.
+    monkeypatch.undo()
+    db = db_module.Database(str(db_path))
+    assert db._migrations_complete is True
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute(
+            "SELECT name FROM schema_migrations"
+        ).fetchall() == [("0001_read_registry",)]
+        assert conn.execute(
+            "SELECT count(*) FROM read_registry WHERE content_hash IS NULL"
+        ).fetchone()[0] == 4
+    finally:
+        conn.close()
+
+
+def test_concurrent_starts_serialise_migration(tmp_path, monkeypatch):
+    """Two processes/threads upgrading at once: one winner, no double work."""
+    from app import db as db_module
+
+    db_path = tmp_path / "concurrent.db"
+    _seed_legacy_db(db_path)
+
+    original = db_module.Database._migrate_legacy_reads
+    hold = threading.Event()
+
+    def slow_backfill(conn):
+        hold.wait(10)
+        time.sleep(0.5)  # keep the write lock so the waiter is definitely queued
+        original(conn)
+
+    monkeypatch.setattr(
+        db_module.Database,
+        "_migrate_legacy_reads",
+        staticmethod(slow_backfill),
+    )
+
+    outcomes = {}
+
+    def init(name):
+        try:
+            db_module.Database(str(db_path))
+            outcomes[name] = "ok"
+        except Exception as exc:  # pragma: no cover - failure path
+            outcomes[name] = repr(exc)
+
+    t1 = threading.Thread(target=init, args=("first",))
+    t2 = threading.Thread(target=init, args=("second",))
+    t1.start()
+    # Winner takes the BEGIN IMMEDIATE lock and enters the slowed back-fill.
+    time.sleep(0.5)
+    t2.start()
+    # The waiter is now queued behind the winner's lock; release the winner.
+    time.sleep(0.5)
+    hold.set()
+    t1.join(30)
+    t2.join(30)
+
+    assert outcomes == {"first": "ok", "second": "ok"}, outcomes
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute(
+            "SELECT count(*) FROM schema_migrations"
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT count(*) FROM read_registry"
+        ).fetchone()[0] == 4
+    finally:
+        conn.close()
+
+
+def test_tombstone_backfill_never_overwrites_real_content(tmp_path):
+    """A registry row carrying real content survives a repeated back-fill."""
+    from app import db as db_module
+
+    db_path = tmp_path / "mixed.db"
+    _seed_legacy_db(db_path)
+    db = db_module.Database(str(db_path))
+    assert db._migrations_complete is True
+
+    # Re-running the back-fill directly (as a restart/resume would against a
+    # file with mixed state) must not replace real rows with NULL tombstones.
+    with db._connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT OR REPLACE INTO read_registry "
+            "(read_id, locus, umi, sequence, qualities, content_hash, "
+            "version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("old-0", "L1", "AAAAA", "ACGT", "[30,30,30,30]",
+             "realhash", 2, "2026-10-03T00:00:00Z"),
+        )
+        db_module.Database._migrate_legacy_reads(conn)
+        conn.commit()
+
+    with db._connect() as conn:
+        row = conn.execute(
+            "SELECT locus, content_hash FROM read_registry WHERE read_id='old-0'"
+        ).fetchone()
+    assert row["locus"] == "L1"
+    assert row["content_hash"] == "realhash"

@@ -60,16 +60,26 @@ N 位置的覆盖数、各碱基权重与是否平票）。
   - 并发的冲突提交由单条写事务串行化：**只有一种内容能落库**，其余请求收到 409。
 - 完全相同的重复行允许提交，自动去重并计入 `stats.duplicate_read_rows`。
 
-#### 旧版数据库升级
+#### 旧版数据库升级（崩溃安全）
 
-升级到本版本时，若库中还没有 `read_registry` 表，服务会自动建表并扫描已有版本快照：
+升级到本版本时，若库中还没有升级完成标记（`schema_migrations` 表中的
+`0001_read_registry` 行），服务会在启动时自动建表并扫描已有版本快照：
 
+- **迁移不以建表视为完成**：建表、旧 ID 回填墓碑、写入完成标记三者在**同一条
+  `BEGIN IMMEDIATE` 写事务**中提交；任一步失败或进程中断，整个事务回滚
+  （连表都不会留下），下次启动重新迁移，不会出现"建了空表就跳过回填"的半迁移库；
+- **重启及并发启动安全**：迁移事务持有 SQLite 写锁，并发启动的另一个实例会在锁上
+  等待，拿到锁后复查完成标记——已完成则跳过，绝不越过未完成迁移；写入路径
+  （`POST /consensus`）在打开自身写事务前同样复查完成标记；
 - **旧版本照常可读**，`GET /consensus/{version}` 返回与升级前完全一致的快照；
 - 旧快照的 `clusters[].read_ids` 只保留了 read_id，**无法还原原始的
-  locus/umi/sequence/qualities**。这些 id 会以内容为 NULL 的「墓碑」记录登记：
-  后续**任何复用该 read_id 的提交都返回 409**（即使新内容看起来合理），服务绝不
-  伪造内容记录；
+  locus/umi/sequence/qualities**。这些 id 会以内容为 NULL 的「墓碑」记录登记
+  （`INSERT OR IGNORE`，墓碑**绝不覆盖**已携带真实内容的登记行）：后续**任何复用
+  该 read_id 的提交都返回 409**（即使新内容看起来合理），服务绝不伪造内容记录；
 - 使用全新 read_id 的提交不受影响，正常创建版本。
+
+完整的旧库升级 + 旧 ID 复用示例见
+[3. 实际请求 / 响应示例 · 旧库升级与旧 read_id 复用](#旧库升级与旧-read_id-复用409)。
 
 ### 1.4 不可变版本与读取一致性
 
@@ -365,6 +375,100 @@ HTTP/1.1 409 Conflict
 > 复用它会得到：
 > `{"detail": {"error": "read_id='...' appeared in a pre-upgrade result whose original content cannot be recovered; the read_id cannot be reused"}}`。
 
+### 旧库升级与旧 read_id 复用（409）
+
+下面的走查使用仓库自带脚本造一个**旧版数据库**（只有 `requests` / `versions`
+两张表、没有 `read_registry`），再用当前版本启动，验证迁移与恢复行为。
+示例请求体见 [`examples/legacy_read_reuse.json`](examples/legacy_read_reuse.json)。
+
+本地方式（Docker Compose 见本节末）：
+
+```bash
+# 1) 用旧版数据文件初始化 ./data/umi.db（含 v1：legacy-run-001，
+#    其 read_id 为 legacy-r0..legacy-r3）
+python3 examples/seed_legacy_db.py ./data/umi.db
+
+# 2) 用当前版本启动，启动时自动完成一次性迁移
+UMI_DB_PATH=./data/umi.db uvicorn app.main:app --port 8000
+```
+
+**旧快照不变**——迁移后直接读取升级前的 v1，字节级一致：
+
+```bash
+curl -sS http://localhost:8000/consensus/1
+```
+
+```json
+{
+  "version": 1,
+  "request_id": "legacy-run-001",
+  "sample_id": "legacy-sample",
+  "consensus": [
+    {"locus": "IGH-A", "representative_umi": "AAAAA", "sequence": "ACGT", "depth": 4, "ambiguous": false}
+  ],
+  "clusters": [
+    {"locus": "IGH-A", "representative_umi": "AAAAA", "members": ["AAAAA"], "ambiguous": false, "depth": 4, "read_ids": ["legacy-r0", "legacy-r1", "legacy-r2", "legacy-r3"]}
+  ],
+  "eliminated": [],
+  "stats": {"loci": 1, "raw_reads": 4, "distinct_reads": 4, "duplicate_read_rows": 0, "clusters": 1, "consensus": 1, "eliminated": 0, "ambiguous_clusters": 0}
+}
+```
+
+**复用旧 read_id → 409，不新增版本。** 旧快照只保留了 id，原始
+locus/umi/sequence/qualities 无法还原，因此即使新提交的内容看起来合理也拒绝：
+
+```bash
+curl -i -X POST http://localhost:8000/consensus \
+  -H 'Content-Type: application/json' \
+  --data @examples/legacy_read_reuse.json
+```
+
+```
+HTTP/1.1 409 Conflict
+```
+
+```json
+{"detail": {"error": "read_id='legacy-r0' appeared in a pre-upgrade result whose original content cannot be recovered; the read_id cannot be reused"}}
+```
+
+此时 `/healthz` 的 `latest_version` 仍为 `1`，失败请求整体回滚、不留版本。
+
+**全新 read_id 仍可正常提交**（分配 v2）；同一 `request_id` 重放同载荷返回原
+版本（`X-Idempotent-Replay: true`），换异载荷返回 409：
+
+```bash
+# 全新 id：200，x-version: 2，x-idempotent-replay: false
+curl -i -X POST http://localhost:8000/consensus -H 'Content-Type: application/json' -d '{
+  "request_id": "post-upgrade-run-002",
+  "sample_id": "sample-2026-1003",
+  "reads": [
+    {"locus": "IGH-A", "read_id": "fresh-r0", "umi": "AAAAA", "sequence": "ACGT", "qualities": [30, 30, 30, 30]},
+    {"locus": "IGH-A", "read_id": "fresh-r1", "umi": "AAAAA", "sequence": "ACGT", "qualities": [30, 30, 30, 30]},
+    {"locus": "IGH-A", "read_id": "fresh-r2", "umi": "AAAAA", "sequence": "ACGT", "qualities": [30, 30, 30, 30]},
+    {"locus": "IGH-A", "read_id": "fresh-r3", "umi": "AAAAA", "sequence": "ACGT", "qualities": [30, 30, 30, 30]}
+  ]
+}'
+# 同 request_id 同载荷重放：200，x-version: 2，x-idempotent-replay: true（不新增版本）
+# 同 request_id 异载荷：409
+# {"detail": {"error": "request_id='post-upgrade-run-002' already submitted with a different payload", "request_id": "post-upgrade-run-002"}}
+```
+
+> 即使首次升级恰好在 `read_registry` 建表落盘后、旧 ID 回填提交前中断，由于
+> 回填与完成标记在同一写事务落盘，重启后不会因"表已存在"而跳过回填：恢复后
+> 复用旧 ID 的行为与上面完全一致（409、不新增版本、旧快照不变）。
+
+Docker Compose 下的等价操作（`examples/` 未打进镜像，用 bind mount 提供
+seed 脚本；`umi-data` 命名卷由 compose 自动挂载）：
+
+```bash
+docker compose build
+# 在 umi-data 卷里造旧库（/data/umi.db）
+docker compose run --rm -v "$PWD/examples:/ex:ro" --entrypoint python \
+  umi-consensus /ex/seed_legacy_db.py /data/umi.db
+# 启动新版本，启动时自动完成一次性迁移
+docker compose up
+```
+
 ### 读取不可变版本
 
 ```bash
@@ -388,11 +492,13 @@ curl -i http://localhost:8000/consensus/999
 │   ├── schemas.py       # Pydantic 请求/响应模型与校验
 │   ├── consensus.py     # 分簇、加权投票、载荷/read 内容指纹（纯函数，可单测）
 │   └── db.py            # SQLite 存储、版本分配、幂等与跨请求 read 冲突事务、旧库迁移
-├── tests/               # pytest：算法单测 + API 端到端（39 个用例）
+├── tests/               # pytest：算法单测 + API 端到端（43 个用例，含中断迁移恢复）
 ├── examples/request.json
 ├── examples/conflict.json                 # 同 request_id 异载荷
 ├── examples/cross_request_reuse.json      # 跨请求同内容复用 → 新版本
 ├── examples/cross_request_conflict.json   # 跨请求同名 read 异内容 → 409
+├── examples/legacy_read_reuse.json        # 旧库升级后复用旧 read_id → 409
+├── examples/seed_legacy_db.py             # 生成旧版数据库文件用于升级演练
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt

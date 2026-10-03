@@ -32,7 +32,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="UMI Molecular Consensus Denoising API",
-    version="1.1.0",
+    version="1.1.1",
     lifespan=lifespan,
     description=(
         "Cluster reads by UMI (frequency/lexicographic ordering, Hamming "

@@ -1,7 +1,7 @@
 services:
   umi-consensus:
     build: .
-    image: umi-consensus-api:1.1.0
+    image: umi-consensus-api:1.1.1
     container_name: umi-consensus-api
     ports:
       - "8000:8000"

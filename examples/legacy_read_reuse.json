@@ -1,0 +1,10 @@
+{
+  "request_id": "post-upgrade-run-001",
+  "sample_id": "sample-2026-1003",
+  "reads": [
+    {"locus": "IGH-A", "read_id": "legacy-r0", "umi": "AAAAA", "sequence": "ACGT", "qualities": [30, 30, 30, 30]},
+    {"locus": "IGH-A", "read_id": "legacy-r1", "umi": "AAAAA", "sequence": "ACGT", "qualities": [30, 30, 30, 30]},
+    {"locus": "IGH-A", "read_id": "legacy-r2", "umi": "AAAAA", "sequence": "ACGT", "qualities": [30, 30, 30, 30]},
+    {"locus": "IGH-A", "read_id": "legacy-r3", "umi": "AAAAA", "sequence": "ACGT", "qualities": [30, 30, 30, 30]}
+  ]
+}
